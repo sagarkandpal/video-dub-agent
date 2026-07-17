@@ -9,6 +9,7 @@ import torch
 import warnings
 from huggingface_hub import login
 from dotenv import load_dotenv
+import librosa
 
 warnings.filterwarnings("ignore")
 
@@ -123,6 +124,77 @@ class SpeakerDiarizer:
             return [
                 {"speaker": "SPEAKER_01", "start": 0, "end": duration, "duration": duration}
             ]
+
+    
+    def detect_speaker_gender(self, audio_path: str, speakers: list) -> dict:
+        """
+        Estimate gender per speaker by concatenating all of that speaker's
+        audio segments into one array, then running pitch analysis once.
+        """
+        import numpy as np
+
+        try:
+            import soundfile as sf
+            y, sr = sf.read(audio_path, dtype='float32')
+            if y.ndim > 1:
+                y = y.mean(axis=1)
+        except Exception as e:
+            print(f"⚠️ Could not load audio for gender detection: {e}")
+            return {}
+
+        speaker_segments = {}
+        for s in speakers:
+            speaker_segments.setdefault(s["speaker"], []).append(s)
+
+        gender_map = {}
+
+        for speaker_id, segs in speaker_segments.items():
+            chunks = []
+            for seg in segs:
+                start_sample = int(seg["start"] * sr)
+                end_sample = int(seg["end"] * sr)
+                chunk = y[start_sample:end_sample]
+                if len(chunk) > 0:
+                    chunks.append(chunk)
+
+            if not chunks:
+                gender_map[speaker_id] = "unknown"
+                continue
+
+            # Concatenate all this speaker's audio into one long array
+            combined = np.concatenate(chunks)
+
+            if len(combined) < sr * 0.3:  # still too short overall
+                gender_map[speaker_id] = "unknown"
+                print(f"⚠️ Not enough audio for {speaker_id}, defaulting to unknown")
+                continue
+
+            try:
+                f0, voiced_flag, _ = librosa.pyin(
+                    combined,
+                    fmin=65.0,
+                    fmax=400.0,
+                    sr=sr,
+                    frame_length=1024,
+                    hop_length=256
+                )
+                valid_f0 = f0[~np.isnan(f0)]
+
+                if len(valid_f0) == 0:
+                    gender_map[speaker_id] = "unknown"
+                    print(f"⚠️ No voiced pitch found for {speaker_id}, defaulting to unknown")
+                    continue
+
+                avg_pitch = float(np.median(valid_f0))
+                gender = "male" if avg_pitch < 165 else "female"
+                gender_map[speaker_id] = gender
+                print(f"🎯 {speaker_id}: avg pitch = {avg_pitch:.1f} Hz → {gender}")
+
+            except Exception as e:
+                print(f"⚠️ Pitch detection failed for {speaker_id}: {e}")
+                gender_map[speaker_id] = "unknown"
+
+        return gender_map
     
     def get_unique_speakers(self, speakers: list) -> list:
         unique = list(set([s["speaker"] for s in speakers]))
