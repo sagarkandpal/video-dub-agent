@@ -30,6 +30,7 @@ class DubbingState(TypedDict):
     audio_path: str
     target_language: str
     speakers: List[Dict]
+    speaker_genders: Dict[str, str]
     transcripts: Dict[str, List[Dict]]
     translated_text: Dict[str, List[Dict]]
     dubbed_segments: List[Dict]
@@ -88,15 +89,22 @@ class DubbingPipeline:
             "status": "Audio extracted successfully"
         }
     
+
     def _diarize_speakers(self, state: DubbingState) -> Dict[str, Any]:
-        """Node 2: Identify speakers in the audio"""
+        """Node 2: Identify speakers and detect their gender"""
         print("🎤 Identifying speakers...")
         speakers = self.diarizer.diarize(state["audio_path"])
+
+        print("🧑‍🤝‍🧑 Detecting speaker gender...")
+        gender_map = self.diarizer.detect_speaker_gender(state["audio_path"], speakers)
+
         return {
             "speakers": speakers,
+            "speaker_genders": gender_map,
             "status": f"Found {len(set(s['speaker'] for s in speakers))} speakers"
         }
     
+
     def _transcribe_segments(self, state: DubbingState) -> Dict[str, Any]:
         """Node 3: Transcribe each speaker segment and save to file"""
         print("📝 Transcribing speaker segments...")
@@ -169,30 +177,37 @@ class DubbingPipeline:
 
     
     def _generate_dub(self, state: DubbingState) -> Dict[str, Any]:
-        """Node 5: Generate dubbed audio for each segment"""
+        """Node 5: Generate dubbed audio for each segment (parallel + gender-matched)"""
         print("🎙️ Generating dubbed voices...")
-        dubbed_segments = []
-        
-        # Create dubbed directory in downloads/
+
         os.makedirs("downloads/dubbed", exist_ok=True)
-        
+
+        # Flatten translated_text into a single segment list with speaker + assigned voice
+        flat_segments = []
         for speaker_id, segments in state["translated_text"].items():
-            for i, segment in enumerate(segments):
-                output_path = f"downloads/dubbed/{speaker_id}_{i}.wav"
-                voice_id = self.dubber.get_voice_for_speaker(speaker_id, state.get("target_language", "Hindi"))
-                audio_path = self.dubber.generate_dub(segment["text"], output_path, speaker_voice=voice_id)
-                dubbed_segments.append({
+            gender = state.get("speaker_genders", {}).get(speaker_id, "unknown")
+            voice_id = self.dubber.get_voice_for_speaker(speaker_id, state.get("target_language", "Hindi"), gender)
+
+            for segment in segments:
+                flat_segments.append({
                     "speaker": speaker_id,
-                    "audio_path": audio_path,
+                    "text": segment["text"],
                     "start": segment["start"],
                     "end": segment["end"],
-                    "text": segment["text"]
+                    "speaker_voice": voice_id
                 })
-        
+
+        dubbed_segments = self.dubber.generate_segment_dubs(
+            flat_segments,
+            output_dir="downloads/dubbed",
+            target_language=state.get("target_language", "Hindi")
+        )
+
         return {
             "dubbed_segments": dubbed_segments,
             "status": f"Generated {len(dubbed_segments)} dubbed segments"
         }
+    
     
     def _sync_video(self, state: DubbingState) -> Dict[str, Any]:
         """Node 6: Sync dubbed audio with video"""
@@ -232,6 +247,7 @@ class DubbingPipeline:
             "audio_path": "",
             "target_language": target_language,
             "speakers": [],
+            "speaker_genders": {},
             "transcripts": {},
             "translated_text": {},
             "dubbed_segments": [],
